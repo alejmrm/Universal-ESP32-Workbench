@@ -1,5 +1,5 @@
 ---
-name: esp32-workbench-logging
+name: workbench-logging
 description: Serial monitor and UDP debug log retrieval from ESP32 devices. Covers pattern matching, boot capture, crash output, and runtime logging. Triggers on "serial monitor", "log", "debug log", "UDP log", "boot output", "crash", "monitor", "pattern".
 ---
 
@@ -18,7 +18,7 @@ curl -s http://esp32-workbench.local:8080/api/info
 If that fails, run the discovery script from the workbench repo:
 
 ```bash
-sudo python3 .claude/skills/esp32-workbench-serial-flashing/discover-workbench.py --hosts
+sudo python3 .claude/skills/esp-idf-handling/discover-workbench.py --hosts
 ```
 
 Two logging methods are available. Choose based on your situation:
@@ -145,7 +145,7 @@ curl -s "http://esp32-workbench.local:8080/api/log?since=2025-01-01T00:00:00Z" |
 
 3. **Monitor OTA progress:**
    - `DELETE /api/udplog` — clear buffer
-   - Trigger OTA (see esp32-workbench-ota)
+   - Trigger OTA (see esp-idf-handling)
    - Poll: `GET /api/udplog?since=<last_ts>&limit=50`
 
 4. **Debug a running device:**

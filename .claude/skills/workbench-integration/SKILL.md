@@ -1,5 +1,5 @@
 ---
-name: esp32-workbench-integration
+name: workbench-integration
 description: >
   Integrates an ESP32 project with the Universal ESP32 Workbench. Adds firmware
   modules (UDP logging, WiFi provisioning, OTA, BLE command handling, strategic
@@ -326,9 +326,9 @@ Update the project's build configuration:
 - `json` (OTA HTTP endpoint)
 - Add `EMBED_FILES "portal.html"` if wifi_prov uses captive portal
 
-**partitions.csv** — copy from `test-firmware/` (`partitions-4mb.csv` for 4MB flash, `partitions.csv` for 8MB+). See `idf-flash` skill for flash size and partition table rules.
+**partitions.csv** — copy from `test-firmware/` (`partitions-4mb.csv` for 4MB flash, `partitions.csv` for 8MB+). See `esp-idf-handling` skill for flash size and partition table rules.
 
-**sdkconfig.defaults** — verify required options are set (NimBLE, partition table, flash size, etc.). See `idf-flash` skill for flash size defaults.
+**sdkconfig.defaults** — verify required options are set (NimBLE, partition table, flash size, etc.). See `esp-idf-handling` skill for flash size defaults.
 
 **dns_server component** — copy `workbench-test/components/dns_server/` if project needs captive portal but doesn't have it
 
@@ -398,7 +398,7 @@ Write a hardware table and a project-specific values table:
 
 #### 8b. Flashing
 
-Document the project-specific esptool command for serial flashing via RFC2217. Reference the `esp32-workbench-serial-flashing` skill for download mode, crash-loop recovery, and dual-USB hub details.
+Document the project-specific esptool command for serial flashing via RFC2217. Reference the `esp-idf-handling` skill for download mode, crash-loop recovery, and dual-USB hub details.
 
 #### 8c. WiFi provisioning
 

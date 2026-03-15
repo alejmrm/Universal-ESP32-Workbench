@@ -1,5 +1,5 @@
 ---
-name: esp32-workbench-ble
+name: workbench-ble
 description: Bluetooth LE scanning, connecting, and GATT writes via the Universal ESP32 Workbench. Triggers on "BLE", "bluetooth", "GATT", "NUS", "Nordic UART".
 ---
 
@@ -18,7 +18,7 @@ curl -s http://esp32-workbench.local:8080/api/info
 If that fails, run the discovery script from the workbench repo:
 
 ```bash
-sudo python3 .claude/skills/esp32-workbench-serial-flashing/discover-workbench.py --hosts
+sudo python3 .claude/skills/esp-idf-handling/discover-workbench.py --hosts
 ```
 
 ## Endpoints
@@ -87,7 +87,7 @@ curl -X POST http://esp32-workbench.local:8080/api/ble/disconnect
    - Connect to device
    - Encode command bytes as hex (e.g., `0x02` + "Hello" = `0248656c6c6f`)
    - Write to NUS RX characteristic
-   - Monitor device response via serial or UDP logs (see esp32-workbench-logging)
+   - Monitor device response via serial or UDP logs (see workbench-logging)
 
 ## Troubleshooting
 

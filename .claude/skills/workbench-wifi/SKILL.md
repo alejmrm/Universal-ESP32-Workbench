@@ -1,5 +1,5 @@
 ---
-name: esp32-workbench-wifi
+name: workbench-wifi
 description: WiFi AP/STA control, scanning, WiFi on/off testing, HTTP relay, and captive portal provisioning for the Universal ESP32 Workbench. Triggers on "wifi", "AP", "station", "scan", "provision", "captive portal", "enter-portal", "HTTP relay", "wifi testing".
 ---
 
@@ -18,7 +18,7 @@ curl -s http://esp32-workbench.local:8080/api/info
 If that fails, run the discovery script from the workbench repo:
 
 ```bash
-sudo python3 .claude/skills/esp32-workbench-serial-flashing/discover-workbench.py --hosts
+sudo python3 .claude/skills/esp-idf-handling/discover-workbench.py --hosts
 ```
 
 ## Operating Modes
@@ -195,7 +195,7 @@ Monitor progress via `GET /api/log`.
 
 3. **Test WiFi disconnect/reconnect behavior:**
    - `POST /api/wifi/ap_stop` — device loses WiFi
-   - Monitor device via serial (see esp32-workbench-logging)
+   - Monitor device via serial (see workbench-logging)
    - `POST /api/wifi/ap_start` — device should reconnect
    - `GET /api/wifi/events` — confirm reconnection
 

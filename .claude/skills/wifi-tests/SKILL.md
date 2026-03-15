@@ -1,5 +1,5 @@
 ---
-name: esp32-wifi-tests
+name: wifi-tests
 description: Include standard WiFi test cases in ESP32 Functional Specification Documents (FSDs). Use when creating or updating any ESP32 project FSD that involves WiFi connectivity, captive portal, MQTT over WiFi, or OTA updates. Triggers on "ESP32 FSD", "functional specification", "WiFi test cases", or when writing test requirements for ESP32 WiFi features.
 ---
 

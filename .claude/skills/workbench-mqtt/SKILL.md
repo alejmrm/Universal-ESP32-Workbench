@@ -1,5 +1,5 @@
 ---
-name: esp32-workbench-mqtt
+name: workbench-mqtt
 description: MQTT broker control on the Universal ESP32 Workbench. Start and stop the broker for testing ESP32 MQTT clients. Triggers on "MQTT", "broker", "mosquitto", "pub", "sub", "publish", "subscribe".
 ---
 
@@ -18,7 +18,7 @@ curl -s http://esp32-workbench.local:8080/api/info
 If that fails, run the discovery script from the workbench repo:
 
 ```bash
-sudo python3 .claude/skills/esp32-workbench-serial-flashing/discover-workbench.py --hosts
+sudo python3 .claude/skills/esp-idf-handling/discover-workbench.py --hosts
 ```
 
 The workbench can run an MQTT broker (mosquitto) for testing ESP32 devices that use MQTT for communication. The broker is accessible to devices connected to the workbench's WiFi AP.
@@ -55,10 +55,10 @@ curl -X POST http://esp32-workbench.local:8080/api/mqtt/stop
 ## Common Workflows
 
 1. **Test ESP32 MQTT client:**
-   - Ensure device is on workbench WiFi (see esp32-workbench-wifi)
+   - Ensure device is on workbench WiFi (see workbench-wifi)
    - `POST /api/mqtt/start` — start broker
    - Device connects to `192.168.4.1:1883`
-   - Monitor device behavior via serial or UDP logs (see esp32-workbench-logging)
+   - Monitor device behavior via serial or UDP logs (see workbench-logging)
    - `POST /api/mqtt/stop` — stop broker when done
 
 2. **Test MQTT disconnect/reconnect:**
