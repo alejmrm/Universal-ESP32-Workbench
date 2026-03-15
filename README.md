@@ -477,31 +477,25 @@ The workbench comes with Claude Code skills that let an AI agent operate the wor
 
 ### Installing Skills
 
-Copy the skills into your project's `.claude/skills/` directory so Claude Code can use them:
+Clone this repo into your workspace — Claude Code automatically discovers skills from `.claude/skills/`:
 
 ```bash
-# From your ESP32 project root
-mkdir -p .claude/skills
-git clone https://github.com/SensorsIot/Universal-ESP32-Workbench.git /tmp/esp32-workbench
-cp -r /tmp/esp32-workbench/.claude/skills/esp32-workbench-* .claude/skills/
-rm -rf /tmp/esp32-workbench
+git clone https://github.com/SensorsIot/Universal-ESP32-Workbench
 ```
-
-### After Installing: Enhance Your FSD
-
-The `esp32-workbench-fsd-writer` skill is a procedure that reads your project's FSD and adds a testing chapter — how to verify each feature using the workbench, with exact curl commands and success criteria. Ask Claude: *"enhance the FSD with workbench integration"*.
 
 ### Available Skills
 
 | Skill | Triggers on | Purpose |
 |-------|-------------|---------|
-| `esp32-workbench-serial` | serial, reset, monitor, flash, esptool | Device discovery, serial reset/monitor, RFC2217 flashing |
-| `esp32-workbench-wifi` | wifi, AP, station, scan, provision | WiFi AP/STA, HTTP relay, captive portal provisioning |
-| `esp32-workbench-ota` | OTA, firmware, upload, update | Firmware upload/list/delete, OTA update workflow |
-| `esp32-workbench-ble` | BLE, bluetooth, GATT, NUS | BLE scan, connect, GATT write |
-| `esp32-workbench-gpio` | GPIO, pin, boot mode, button | Drive Pi GPIO pins for boot mode control |
-| `esp32-workbench-udplog` | UDP log, debug log, remote log | Retrieve/clear UDP debug logs, activity log |
-| `esp32-workbench-fsd-writer` | FSD, enhance FSD, add testing | Reads your FSD and adds a testing chapter with workbench procedures |
+| `esp-idf-handling` | flash, build, idf.py, monitor, slot, OTA, esptool | Full ESP-IDF lifecycle — auto-detects local USB vs workbench |
+| `esp-pio-handling` | pio, platformio, pio run, pio upload | Full PlatformIO lifecycle — auto-detects local USB vs workbench |
+| `esp32-fsd-writer` | FSD, write FSD, functional spec | ESP32 FSD generation with 9 test spec libraries |
+| `workbench-integration` | integrate workbench, add testing | Adds workbench modules and testing chapters to project FSD |
+| `workbench-test-handling` | test progress, test session, operator | Test execution, progress tracking, operator interaction |
+| `workbench-wifi` | wifi, AP, station, scan, provision | WiFi AP/STA, HTTP relay, captive portal provisioning |
+| `workbench-ble` | BLE, bluetooth, GATT, NUS | BLE scan, connect, GATT write |
+| `workbench-mqtt` | MQTT, broker, publish, subscribe | MQTT broker control |
+| `workbench-logging` | serial monitor, log, UDP log | Serial monitor, UDP debug logs |
 
 ---
 
