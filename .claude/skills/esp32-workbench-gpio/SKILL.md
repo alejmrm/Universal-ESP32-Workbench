@@ -18,7 +18,7 @@ curl -s http://esp32-workbench.local:8080/api/info
 If that fails, run the discovery script from the workbench repo:
 
 ```bash
-sudo python3 discover-workbench.py --hosts
+sudo python3 .claude/skills/esp32-workbench-serial-flashing/discover-workbench.py --hosts
 ```
 
 ## Endpoints

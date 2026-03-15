@@ -20,7 +20,7 @@ Before using any workbench API, run the discovery script to find the workbench
 and ensure `esp32-workbench.local` resolves:
 
 ```bash
-sudo python3 discover-workbench.py --hosts
+sudo python3 .claude/skills/esp32-workbench-serial-flashing/discover-workbench.py --hosts
 ```
 
 This sends a UDP probe to every IP on the gateway subnet and writes the result
