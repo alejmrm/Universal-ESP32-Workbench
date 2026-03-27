@@ -108,6 +108,7 @@ Mode is switched via `POST /api/wifi/mode` or the web UI toggle.
 | conftest.py | pytest/ | Pytest fixtures and CLI options |
 | test_instrument.py | pytest/ | WiFi workbench self-tests (WT-xxx) |
 | cw_beacon.py | /usr/local/bin/cw_beacon.py | CW beacon engine (GPCLK hardware clock + Morse keying) |
+| debug_controller.py | /usr/local/bin/debug_controller.py | GDB debug manager (OpenOCD lifecycle, probe allocation) |
 
 ### 1.6 State Model
 
@@ -126,6 +127,7 @@ its own state machine.  Serial operates per slot; WiFi operates on wlan0.
 | Flapping | USB connect/disconnect cycling detected — recovery failed or pending |
 | Recovering | USB unbound, recovery in progress (GPIO or backoff) |
 | Download Mode | GPIO holding BOOT LOW, device stable in bootloader — ready to flash |
+| Debugging | OpenOCD running for this slot — GDB clients can connect; RFC2217 proxy stopped (FR-024) or running (FR-025/026) |
 
 State transitions:
 
@@ -146,6 +148,8 @@ State transitions:
 | Recovering | Flapping | No-GPIO rebind fails (flapping resumes, up to 4 retries) |
 | Download Mode | Idle | `POST /api/serial/release` (BOOT released, EN pulsed) |
 | Flapping | Idle | Cooldown expires passively (fallback) |
+| Idle | Debugging | `POST /api/debug/start` — starts OpenOCD (FR-024/025/026) |
+| Debugging | Idle | `POST /api/debug/stop` — stops OpenOCD, restarts proxy |
 
 **WiFi Service (wlan0):**
 
@@ -711,6 +715,12 @@ serial-interface mode.
 | **Test Progress** | | |
 | POST | /api/test/update | Push test session start, step, result, or end (FR-019) |
 | GET | /api/test/progress | Poll current test session state (FR-019) |
+| **GDB Debug** | | |
+| POST | /api/debug/start | Start OpenOCD for a slot (FR-024/025/026) |
+| POST | /api/debug/stop | Stop OpenOCD, release slot/probe (FR-024/025/026) |
+| GET | /api/debug/status | Debug state for all slots (FR-024/025/026) |
+| GET | /api/debug/group | Slot groups and roles — dual-USB (FR-025) |
+| GET | /api/debug/probes | Available debug probes — ESP-Prog (FR-026) |
 | **CW Beacon** | | |
 | POST | /api/cw/start | Start Morse-keyed GPCLK carrier (FR-023) |
 | POST | /api/cw/stop | Stop CW beacon (FR-023) |
@@ -1438,6 +1448,627 @@ wt.cw_stop()
 wt.cw_frequencies(low=3_500_000, high=4_000_000)  # list of {divider, freq_hz}
 ```
 
+### FR-024 — GDB Debug: USB JTAG (ESP32-C3/S3 Single-Port)
+
+Remote GDB debugging for ESP32-C3 and ESP32-S3 boards that expose a built-in
+USB-Serial/JTAG controller on their native USB port.  The same USB cable
+already used for serial also carries JTAG — no additional hardware required.
+
+#### 24.1 Principle
+
+ESP32-C3 and ESP32-S3 chips contain a USB-Serial/JTAG controller that
+exposes **two USB interfaces** on a single cable:
+
+| USB Interface | Linux Driver | Function |
+|---------------|-------------|----------|
+| Interface 0 | `cdc_acm` → `/dev/ttyACM*` | Serial console (current RFC2217 proxy) |
+| Interface 1 | libusb (userspace) | JTAG debug (OpenOCD) |
+
+OpenOCD communicates with the JTAG interface via libusb, completely
+independent of the serial interface.  The portal starts OpenOCD for a slot
+and exposes the GDB Remote Serial Protocol (RSP) on a per-slot TCP port.
+Remote containers connect GDB to that port — no USB/JTAG drivers needed on
+the client side.
+
+#### 24.2 Supported Chips
+
+| Chip | USB JTAG | Condition |
+|------|:--------:|-----------|
+| ESP32-C3 | Yes | Board must use native USB (not CP2102/CH340 bridge) |
+| ESP32-S3 | Yes | Board must use native USB (not UART bridge) |
+| ESP32 (classic) | No | No USB JTAG — use FR-026 (ESP-Prog) |
+| ESP32-S2 | No | USB-OTG only, no built-in JTAG controller |
+
+#### 24.3 Software Dependencies
+
+**On the Pi:**
+- `esp-openocd` — Espressif's fork (not upstream OpenOCD).  Required for
+  ESP32 flash drivers, reset sequences, and USB JTAG support.  Must be the
+  **aarch64** build matching the Pi Zero 2 W's ARM Cortex-A53.
+- Installation: download from Espressif's GitHub releases as part of the
+  ESP-IDF tools package, or extract the standalone `openocd-esp32` binary.
+- Target configs: `board/esp32c3-builtin.cfg`, `board/esp32s3-builtin.cfg`
+
+**On the remote container (developer side):**
+- `riscv32-esp-elf-gdb` (for C3) or `xtensa-esp32s3-elf-gdb` (for S3)
+  — included in ESP-IDF toolchain
+- No special drivers or USB access needed — pure TCP connection
+
+#### 24.4 Configuration
+
+| Constant | Default | Env Override | Description |
+|----------|---------|-------------|-------------|
+| GDB_PORT_BASE | 3333 | `GDB_PORT_BASE` | First GDB RSP port (per-slot: +0, +1, +2) |
+| OPENOCD_TELNET_BASE | 4444 | `OPENOCD_TELNET_BASE` | First OpenOCD telnet port |
+| OPENOCD_EXE | `/usr/local/bin/openocd-esp32` | `OPENOCD_EXE` | Path to esp-openocd binary |
+
+**Slot configuration** (`slots.json` extension):
+```json
+{
+  "slots": [
+    {
+      "label": "SLOT1",
+      "slot_key": "platform-...",
+      "tcp_port": 4001,
+      "gdb_port": 3333,
+      "openocd_telnet_port": 4444
+    }
+  ]
+}
+```
+
+#### 24.5 State Model Extension
+
+New slot state `Debugging` added to the Serial Service state machine:
+
+| State | Description |
+|-------|-------------|
+| Debugging | OpenOCD running — GDB clients can connect; RFC2217 proxy stopped |
+
+State transitions:
+
+| From | To | Trigger |
+|------|----|---------|
+| Idle | Debugging | `POST /api/debug/start` — stops proxy, starts OpenOCD |
+| Debugging | Idle | `POST /api/debug/stop` — stops OpenOCD, restarts proxy |
+| Debugging | Debugging | Hotplug events suppressed (USB re-enumeration during JTAG reset is normal) |
+
+**Mutual exclusion:** A slot in `Debugging` state rejects `serial/reset`,
+`serial/monitor`, and `enter-portal` requests.  Flashing via esptool is
+blocked — the chip's CPU is under OpenOCD control.
+
+#### 24.6 Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | /api/debug/start | Start OpenOCD for a slot, expose GDB port |
+| POST | /api/debug/stop | Stop OpenOCD, release slot back to serial |
+| GET | /api/debug/status | Debug state for all slots |
+
+**POST /api/debug/start** body:
+```json
+{"slot": "SLOT1", "chip": "esp32c3"}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| slot | string | Yes | — | Slot label |
+| chip | string | Yes | — | Chip type: `esp32c3` or `esp32s3` |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "slot": "SLOT1",
+  "gdb_port": 3333,
+  "telnet_port": 4444,
+  "chip": "esp32c3",
+  "gdb_target": "target extended-remote esp32-workbench.local:3333"
+}
+```
+
+**POST /api/debug/stop** body:
+```json
+{"slot": "SLOT1"}
+```
+
+**Response:**
+```json
+{"ok": true, "slot": "SLOT1"}
+```
+
+**GET /api/debug/status** response:
+```json
+{
+  "ok": true,
+  "slots": {
+    "SLOT1": {"debugging": true, "chip": "esp32c3", "gdb_port": 3333, "pid": 5678},
+    "SLOT2": {"debugging": false}
+  }
+}
+```
+
+**Error responses:**
+
+| Condition | HTTP | Response |
+|-----------|------|----------|
+| Slot not found | 404 | `{"ok": false, "error": "slot not found"}` |
+| Device not present | 409 | `{"ok": false, "error": "no device in SLOT1"}` |
+| Already debugging | 409 | `{"ok": false, "error": "SLOT1 already in debug mode"}` |
+| Not debugging (on stop) | 200 | `{"ok": true}` (idempotent) |
+| OpenOCD failed to start | 500 | `{"ok": false, "error": "openocd failed: ..."}` |
+| Unsupported chip | 400 | `{"ok": false, "error": "chip 'esp32' has no USB JTAG — use ESP-Prog"}` |
+
+#### 24.7 OpenOCD Lifecycle
+
+**Start sequence:**
+1. Validate slot is `Idle` and device is present
+2. Stop RFC2217 proxy for the slot
+3. Launch `openocd-esp32` as subprocess:
+   ```
+   openocd-esp32 \
+     -f board/esp32c3-builtin.cfg \
+     -c "gdb_port {gdb_port}" \
+     -c "telnet_port {telnet_port}" \
+     -c "bindto 0.0.0.0"
+   ```
+4. Wait up to 5s for OpenOCD to bind (poll TCP port)
+5. Set slot state to `Debugging`, record PID
+
+**Stop sequence:**
+1. Send SIGTERM to OpenOCD process
+2. Wait up to 5s for exit
+3. Set slot state to `Idle`
+4. Restart RFC2217 proxy via simulated hotplug
+
+**Hotplug during debug:** USB re-enumeration events (from JTAG-initiated
+resets) are logged but do NOT trigger proxy restarts while in `Debugging`
+state.  OpenOCD manages USB reconnection internally.
+
+#### 24.8 Serial Console During Debug
+
+**Limitation:** With single-port USB JTAG, the RFC2217 proxy must be stopped
+while OpenOCD is running.  OpenOCD can provide a "virtual serial" via its
+TCL interface, but this is not a full serial console.
+
+For simultaneous serial + debug, use FR-025 (Dual-USB) or FR-026 (ESP-Prog).
+
+#### 24.9 Driver Methods
+
+```python
+# Start debug session
+info = wt.debug_start("SLOT1", chip="esp32c3")
+print(f"GDB port: {info['gdb_port']}")
+# → Connect GDB: target extended-remote esp32-workbench.local:3333
+
+# Check status
+status = wt.debug_status()
+
+# Stop debug session (restarts RFC2217 proxy)
+wt.debug_stop("SLOT1")
+```
+
+#### 24.10 IDE Integration (Client Side)
+
+**VS Code (launch.json):**
+```json
+{
+  "type": "cppdbg",
+  "request": "launch",
+  "program": "${workspaceFolder}/build/project.elf",
+  "miDebuggerPath": "riscv32-esp-elf-gdb",
+  "miDebuggerServerAddress": "esp32-workbench.local:3333",
+  "setupCommands": [
+    {"text": "set remote hardware-breakpoint-limit 2"},
+    {"text": "monitor reset halt"}
+  ]
+}
+```
+
+**Command-line GDB:**
+```bash
+riscv32-esp-elf-gdb build/project.elf \
+  -ex "target extended-remote esp32-workbench.local:3333" \
+  -ex "monitor reset halt"
+```
+
+**PlatformIO (platformio.ini):**
+```ini
+debug_tool = esp-builtin
+debug_server =
+  # empty — use remote server instead
+debug_port = esp32-workbench.local:3333
+```
+
+---
+
+### FR-025 — GDB Debug: Dual-USB (ESP32-S3 Two-Port)
+
+Remote GDB debugging for ESP32-S3 boards that break out **both** USB
+connectors — USB-OTG and USB-Serial/JTAG.  This is the optimal debug
+configuration: serial console, JTAG debugger, and application USB all run
+simultaneously with zero contention.
+
+#### 25.1 Principle
+
+The ESP32-S3 has two independent USB controllers:
+
+| USB Port | Controller | Hub Port | Function |
+|----------|-----------|----------|----------|
+| USB-Serial/JTAG | Dedicated debug | SLOT*n* | Serial console (RFC2217) + JTAG (OpenOCD) |
+| USB-OTG | Full-speed peripheral | SLOT*n*-APP | Application USB (HID, CDC, MSC, etc.) |
+
+Both ports plug into the Pi's USB hub, consuming **two hub ports per DUT**.
+The serial/JTAG port runs RFC2217 AND OpenOCD simultaneously because they
+use separate USB endpoints.  The OTG port provides the DUT's actual USB
+function (e.g., HID keyboard, CDC serial, mass storage).
+
+#### 25.2 Key Advantage: No Contention
+
+Unlike FR-024 (single-port), the RFC2217 proxy does NOT need to stop during
+debugging.  All three functions coexist:
+
+| Function | USB Port | Simultaneous |
+|----------|----------|:---:|
+| Serial console (RFC2217) | Serial/JTAG | Yes |
+| GDB debugging (OpenOCD) | Serial/JTAG | Yes |
+| Application USB | OTG | Yes |
+
+This means:
+- `printf` debugging and GDB breakpoints work at the same time
+- Test scripts can interact with the DUT's USB function while debugging
+- No state machine changes — the slot stays in `Idle` while OpenOCD runs
+
+#### 25.3 Supported Boards
+
+Only ESP32-S3 boards that break out **both** USB connectors:
+
+| Board | USB-Serial/JTAG | USB-OTG | Dual-USB |
+|-------|:---:|:---:|:---:|
+| ESP32-S3-DevKitC-1 (v1.1+) | Yes | Yes | Yes |
+| ESP32-S3-DevKitM-1 | Yes | No | No |
+| Custom boards with both ports | Yes | Yes | Yes |
+
+ESP32-C3 boards do not have USB-OTG — they have only one USB port.
+
+#### 25.4 Slot Pairing
+
+Two hub ports belong to the same DUT.  Configuration uses a `slot_group`:
+
+```json
+{
+  "slots": [
+    {
+      "label": "SLOT1",
+      "slot_key": "platform-...-usb-0:1.1:1.0",
+      "tcp_port": 4001,
+      "gdb_port": 3333,
+      "openocd_telnet_port": 4444,
+      "group": "DUT1",
+      "role": "debug"
+    },
+    {
+      "label": "SLOT1-APP",
+      "slot_key": "platform-...-usb-0:1.2:1.0",
+      "tcp_port": 4002,
+      "group": "DUT1",
+      "role": "application"
+    }
+  ]
+}
+```
+
+The `group` field links the two slots.  The `role` field identifies which
+USB port is which:
+- `debug` — USB-Serial/JTAG port (serial + JTAG)
+- `application` — USB-OTG port (DUT's USB function)
+
+#### 25.5 Endpoints
+
+Same endpoints as FR-024 (`/api/debug/start`, `/api/debug/stop`,
+`/api/debug/status`), plus:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | /api/debug/group | Show slot groups and their roles |
+
+**POST /api/debug/start** — same as FR-024.  The portal automatically
+identifies the `debug`-role slot within the group.
+
+**GET /api/debug/group** response:
+```json
+{
+  "ok": true,
+  "groups": {
+    "DUT1": {
+      "debug": {"label": "SLOT1", "tcp_port": 4001, "gdb_port": 3333, "present": true},
+      "application": {"label": "SLOT1-APP", "tcp_port": 4002, "present": true}
+    }
+  }
+}
+```
+
+#### 25.6 OpenOCD Lifecycle
+
+Same as FR-024 §24.7, except:
+- The RFC2217 proxy is **NOT stopped** when OpenOCD starts (serial and JTAG
+  coexist on separate USB endpoints)
+- Slot state remains `Idle` — no `Debugging` state needed
+- OpenOCD is tracked as a parallel process alongside the RFC2217 proxy
+
+#### 25.7 Application USB Port
+
+The application USB port (SLOT*n*-APP) appears as whatever USB device class
+the DUT firmware implements.  Common cases:
+
+| DUT USB Class | Linux Device | Workbench Use |
+|---------------|-------------|---------------|
+| CDC-ACM (serial) | `/dev/ttyACM*` | Second RFC2217 proxy (data channel) |
+| HID (keyboard/mouse) | `/dev/hidraw*` | Capture HID reports |
+| MSC (mass storage) | `/dev/sd*` | Mount filesystem |
+| Custom vendor | — | Raw USB via libusb |
+
+The RFC2217 proxy on the APP slot proxies CDC-ACM output.  For non-serial
+USB classes, the portal does not proxy — the application port is available
+for direct use or future extensions.
+
+#### 25.8 Driver Methods
+
+```python
+# Discover slot groups
+groups = wt.debug_groups()
+dut1 = groups["DUT1"]
+print(f"Debug serial: rfc2217://...:{dut1['debug']['tcp_port']}")
+print(f"App USB: rfc2217://...:{dut1['application']['tcp_port']}")
+
+# Start debug (serial proxy stays running)
+info = wt.debug_start("SLOT1", chip="esp32s3")
+
+# Now you have all three simultaneously:
+#   - Serial console via RFC2217 on port 4001
+#   - GDB via port 3333
+#   - App USB via RFC2217 on port 4002
+
+wt.debug_stop("SLOT1")
+```
+
+#### 25.9 Hub Port Planning
+
+The Pi Zero 2 W has a single USB 2.0 port driving an external hub.  With
+dual-USB boards consuming 2 ports each:
+
+| Hub Ports | DUTs | Remaining |
+|-----------|------|-----------|
+| 3-port hub | 1 DUT + 1 port for USB Ethernet | None |
+| 4-port hub | 1 DUT + USB Ethernet + 1 spare | — |
+| 7-port hub | 3 DUTs + USB Ethernet | None |
+
+A larger hub is recommended for dual-USB debugging.
+
+---
+
+### FR-026 — GDB Debug: ESP-Prog External Probe
+
+Remote GDB debugging using an ESP-Prog (FT2232H) external debug probe for
+**any ESP32 variant** — including the classic ESP32 which has no USB JTAG.
+The probe connects to the DUT's JTAG pins via a ribbon cable and to the Pi's
+USB hub for OpenOCD control.
+
+#### 26.1 Principle
+
+The ESP-Prog is Espressif's reference debug probe based on the FTDI FT2232H
+dual-channel chip:
+
+| Channel | Function |
+|---------|----------|
+| Channel A | JTAG (TCK, TDI, TDO, TMS) |
+| Channel B | UART (TX, RX) — optional serial console |
+
+The probe plugs into the Pi's USB hub and connects to the DUT via a 10-pin
+JTAG header or individual wires.  OpenOCD uses the `ftdi` driver with
+ESP-Prog-specific configuration.
+
+**Key advantage:** Serial and JTAG are on completely separate physical
+connections — the DUT's USB serial (RFC2217) and the probe's JTAG operate
+simultaneously with zero contention.
+
+#### 26.2 Supported Chips
+
+All ESP32 variants with accessible JTAG pins:
+
+| Chip | JTAG Pins (TCK/TDI/TDO/TMS) | Notes |
+|------|------------------------------|-------|
+| ESP32 (classic) | 13 / 12 / 15 / 14 | Conflicts with SD card interface; GPIO12 is a strapping pin |
+| ESP32-C3 | 4 / 5 / 6 / 7 | Cannot use USB JTAG and pin JTAG simultaneously |
+| ESP32-S2 | 39 / 40 / 41 / 42 | — |
+| ESP32-S3 | 39 / 40 / 41 / 42 | Prefer USB JTAG (FR-024) unless pins are already wired |
+| ESP32-C6 | 4 / 5 / 6 / 7 | Same as C3 |
+| ESP32-H2 | 4 / 5 / 6 / 7 | Same as C3 |
+
+**Requirement:** The DUT board must expose the JTAG pins on a header or
+test points.  Many production modules do not — check the board's schematic.
+
+#### 26.3 Hardware Setup
+
+| Component | Description |
+|-----------|-------------|
+| ESP-Prog | ~$15, Espressif reference probe (FT2232H-based) |
+| JTAG cable | 10-pin ribbon or 4 jumper wires (TCK, TDI, TDO, TMS + GND) |
+| USB cable | ESP-Prog → Pi USB hub (consumes 1 hub port) |
+
+**Wiring (ESP-Prog JTAG header to DUT):**
+
+| ESP-Prog Pin | Signal | DUT Pin (varies by chip) |
+|-------------|--------|--------------------------|
+| 1 | VDD (3.3V) | 3.3V (optional, for probe power sensing) |
+| 2 | TMS | Chip-specific (see §26.2) |
+| 3 | GND | GND |
+| 4 | TCK | Chip-specific |
+| 5 | GND | GND |
+| 6 | TDO | Chip-specific |
+| 7 | GND | GND |
+| 8 | TDI | Chip-specific |
+| 9 | GND | GND |
+| 10 | NC | — |
+
+#### 26.4 Software Dependencies
+
+**On the Pi:**
+- `esp-openocd` — same binary as FR-024
+- Target configs: `board/esp32-wrover-kit-1.8v.cfg` (classic ESP32),
+  `interface/ftdi/esp32_devkitj_v1.cfg` (ESP-Prog interface), etc.
+- `libftdi1` and `libudev-dev` for FTDI device access
+- udev rule for non-root FTDI access (or run OpenOCD as root)
+
+#### 26.5 Configuration
+
+The ESP-Prog is configured as a **shared resource** — not tied to a specific
+slot.  The portal tracks which slot's DUT is connected to the probe.
+
+```json
+{
+  "debug_probes": [
+    {
+      "label": "PROBE1",
+      "type": "esp-prog",
+      "usb_serial": "FT2232H-A",
+      "interface_config": "interface/ftdi/esp32_devkitj_v1.cfg"
+    }
+  ]
+}
+```
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| PROBE_GDB_PORT | 3333 | GDB RSP port for the probe |
+| PROBE_TELNET_PORT | 4444 | OpenOCD telnet port for the probe |
+
+#### 26.6 Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | /api/debug/start | Start OpenOCD via ESP-Prog for a slot |
+| POST | /api/debug/stop | Stop OpenOCD, release probe |
+| GET | /api/debug/status | Debug state (probe and slot info) |
+| GET | /api/debug/probes | List available debug probes |
+
+**POST /api/debug/start** body:
+```json
+{"slot": "SLOT1", "chip": "esp32", "probe": "PROBE1"}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| slot | string | Yes | — | Slot label (identifies which DUT) |
+| chip | string | Yes | — | Chip type: `esp32`, `esp32c3`, `esp32s3`, etc. |
+| probe | string | No | first available | Probe label |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "slot": "SLOT1",
+  "probe": "PROBE1",
+  "chip": "esp32",
+  "gdb_port": 3333,
+  "telnet_port": 4444,
+  "gdb_target": "target extended-remote esp32-workbench.local:3333"
+}
+```
+
+**GET /api/debug/probes** response:
+```json
+{
+  "ok": true,
+  "probes": [
+    {"label": "PROBE1", "type": "esp-prog", "in_use": false, "slot": null}
+  ]
+}
+```
+
+#### 26.7 OpenOCD Lifecycle
+
+**Start sequence:**
+1. Validate probe is available and slot has a device
+2. Launch OpenOCD:
+   ```
+   openocd-esp32 \
+     -f interface/ftdi/esp32_devkitj_v1.cfg \
+     -f target/esp32.cfg \
+     -c "gdb_port 3333" \
+     -c "telnet_port 4444" \
+     -c "bindto 0.0.0.0"
+   ```
+3. Wait up to 5s for OpenOCD to bind
+4. Mark probe as in-use, record slot assignment
+
+**Stop sequence:**
+1. SIGTERM → OpenOCD
+2. Release probe, clear slot assignment
+
+**Key difference from FR-024:** The RFC2217 proxy is NOT stopped.  The probe
+uses the JTAG pins, not the USB serial connection.  Serial console remains
+available throughout the debug session.
+
+#### 26.8 Simultaneous Serial + Debug
+
+This is a primary advantage of the ESP-Prog approach:
+
+| Connection | Path | Available During Debug |
+|-----------|------|:---:|
+| Serial console | USB → RFC2217 → ttyACM/ttyUSB | Yes |
+| GDB debugger | ESP-Prog → JTAG pins → OpenOCD → TCP | Yes |
+| esptool flash | USB → RFC2217 → ttyACM/ttyUSB | No (CPU halted at breakpoint) |
+
+Developers can see `printf` output in the serial console while
+single-stepping through code in GDB.
+
+#### 26.9 Classic ESP32 JTAG Caveats
+
+**GPIO12 strapping pin:** On the classic ESP32, JTAG TDI is GPIO12, which
+is also the flash voltage selection strapping pin.  If GPIO12 is HIGH at
+boot, the chip configures 1.8V flash — which causes a crash on boards with
+3.3V flash.
+
+**Mitigations:**
+- Burn the `VDD_SDIO` eFuse to force 3.3V flash (permanent, one-time)
+- Use `openocd -c "reset_config none"` to prevent OpenOCD from toggling
+  signals during connection
+- Ensure the probe's TDI line is LOW or floating at DUT power-up
+
+**JTAG eFuse:** On some ESP32 variants, the JTAG interface can be
+permanently disabled by burning the `JTAG_DISABLE` eFuse.  Production-fused
+chips cannot be debugged regardless of probe.
+
+#### 26.10 Driver Methods
+
+```python
+# List probes
+probes = wt.debug_probes()
+
+# Start debug via ESP-Prog (serial stays running)
+info = wt.debug_start("SLOT1", chip="esp32", probe="PROBE1")
+
+# Serial + debug coexist:
+wt.serial_monitor("SLOT1", pattern="WiFi connected", timeout=10)
+# Meanwhile: GDB connected on port 3333
+
+wt.debug_stop("SLOT1")
+```
+
+#### 26.11 Compatible Alternatives to ESP-Prog
+
+| Probe | Chip | OpenOCD Driver | JTAG Speed | Notes |
+|-------|------|---------------|-----------|-------|
+| ESP-Prog | FT2232H | `ftdi` | 20 MHz | Reference probe, recommended |
+| Generic FT2232H board | FT2232H | `ftdi` | 20 MHz | Requires custom `ftdi_vid_pid` |
+| FT232H (single-channel) | FT232H | `ftdi` | 20 MHz | No UART channel |
+| Segger J-Link | — | `jlink` | 15 MHz | Expensive but very reliable |
+| Tigard | FT2232H | `ftdi` | 20 MHz | Multi-protocol, open-source |
+
+All alternatives use the same portal API — only the OpenOCD interface config
+changes.
+
 ---
 
 ## 5. Web Portal
@@ -1736,6 +2367,23 @@ Add `--run-dut` to include tests that require a WiFi device under test.
 | WT-1302 | CW beacon frequency list | CW Beacon | No |
 | WT-1303 | CW beacon invalid pin rejected | CW Beacon | No |
 | WT-1304 | CW beacon replaces previous | CW Beacon | No |
+| WT-1400 | Debug start (USB JTAG) | Debug: USB JTAG | Yes |
+| WT-1401 | Debug stop restores serial | Debug: USB JTAG | Yes |
+| WT-1402 | Debug status | Debug: USB JTAG | Yes |
+| WT-1403 | Debug reject absent slot | Debug: USB JTAG | No |
+| WT-1404 | Debug reject unsupported chip | Debug: USB JTAG | No |
+| WT-1405 | Debug reject duplicate start | Debug: USB JTAG | Yes |
+| WT-1406 | Hotplug suppressed during debug | Debug: USB JTAG | Yes |
+| WT-1500 | Dual-USB group discovery | Debug: Dual-USB | Yes |
+| WT-1501 | Debug start with serial coexist | Debug: Dual-USB | Yes |
+| WT-1502 | Application USB port accessible | Debug: Dual-USB | Yes |
+| WT-1503 | Serial monitor during debug | Debug: Dual-USB | Yes |
+| WT-1600 | Probe list | Debug: ESP-Prog | No |
+| WT-1601 | Debug start via probe | Debug: ESP-Prog | Yes |
+| WT-1602 | Debug stop releases probe | Debug: ESP-Prog | Yes |
+| WT-1603 | Serial available during probe debug | Debug: ESP-Prog | Yes |
+| WT-1604 | Probe busy rejected | Debug: ESP-Prog | Yes |
+| WT-1605 | Classic ESP32 via probe | Debug: ESP-Prog | Yes |
 
 \* WT-503/504 require a running AP (wifi_network fixture) but not a physical DUT.
 
@@ -1760,6 +2408,7 @@ Add `--run-dut` to include tests that require a WiFi device under test.
 | 6.2 | 2026-02-09 | Claude | GPIO control (FR-018): drive Pi GPIO pins from test scripts to control DUT hardware signals (e.g. hold GPIO 2 low during boot for captive portal trigger); pin allowlist, lazy gpiod init, release-to-input lifecycle; WT-800–806 test cases. Test progress tracking (FR-019): live test session updates pushed to web UI; WT-900–903 test cases |
 | 7.0 | 2026-02-25 | Claude | Three new services: UDP log receiver (FR-020) for ESP32 remote debug logs on port 5555; OTA firmware repository (FR-021) for serving .bin files to ESP32 OTA clients; BLE proxy (FR-022) for scan/connect/write to BLE peripherals via HTTP API using bleak. New deliverable: `ble_controller.py`. WT-1000–1207 test cases |
 | 7.1 | 2026-03-15 | Claude | Hostname renamed Serial1 → esp32-workbench; all references updated to esp32-workbench.local. UDP discovery beacon added to portal.py (port 5888) — containers can discover the workbench automatically. Skills consolidated from 14 → 9: merged flash skills into `esp-idf-handling` (auto-detects local vs workbench), PIO skills into `esp-pio-handling`, FSD + WiFi tests into `fsd-writer` with 9 test spec libraries (WiFi, captive portal, MQTT, BLE, OTA, USB HID, NVS, watchdog, logging). Removed `esp32-` prefix from workbench service skills. `fsd-writer` renamed from `esp32-fsd-writer` to be project-agnostic |
+| 8.0 | 2026-03-27 | Claude | Remote GDB debugging — three variants: FR-024 USB JTAG (C3/S3 single-port, OpenOCD via built-in USB-Serial/JTAG), FR-025 Dual-USB (S3 two-port, serial+JTAG+app USB simultaneously), FR-026 ESP-Prog (external FT2232H probe for all ESP32 variants including classic). New `Debugging` slot state, `debug_controller.py` module, 5 API endpoints, slot groups for dual-USB, probe allocation for ESP-Prog. WT-1400–1605 test cases (18 tests). TASK-130–155 |
 | 7.2 | 2026-03-27 | Claude | CW beacon (FR-023): Morse-keyed RF carrier via BCM2835 GPCLK hardware on GPIO 5/6 for direction finder testing; PLLD 500 MHz integer divider for jitter-free 80m band output; PARIS-standard Morse timing 1–60 WPM; cw_beacon.py module; 4 API endpoints; driver methods cw_start/stop/status/frequencies; WT-1300–1304 test cases |
 
 ---
@@ -2082,6 +2731,31 @@ Add this to /etc/rfc2217/slots.json:
 - [x] TASK-123: Deploy to Pi and verify API endpoints
 - [x] TASK-124: Implement WT-1300–1304 CW beacon test cases
 
+**GDB Debug: USB JTAG (v8.0):**
+- [ ] TASK-130: Install esp-openocd (aarch64) on Pi
+- [ ] TASK-131: Add `Debugging` state to slot state machine
+- [ ] TASK-132: Implement `POST /api/debug/start` and `POST /api/debug/stop`
+- [ ] TASK-133: Implement `GET /api/debug/status`
+- [ ] TASK-134: Suppress hotplug proxy restarts during `Debugging` state
+- [ ] TASK-135: Add `gdb_port` and `openocd_telnet_port` to slots.json schema
+- [ ] TASK-136: Add `debug_start/stop/status()` methods to driver
+- [ ] TASK-137: Implement WT-1400–1406 USB JTAG debug test cases
+
+**GDB Debug: Dual-USB (v8.0):**
+- [ ] TASK-140: Implement slot grouping (`group` and `role` fields in slots.json)
+- [ ] TASK-141: Implement `GET /api/debug/group` endpoint
+- [ ] TASK-142: Allow OpenOCD + RFC2217 to coexist on `debug`-role slots
+- [ ] TASK-143: Add `debug_groups()` method to driver
+- [ ] TASK-144: Implement WT-1500–1503 Dual-USB debug test cases
+
+**GDB Debug: ESP-Prog (v8.0):**
+- [ ] TASK-150: Add `debug_probes` configuration to slots.json
+- [ ] TASK-151: Implement probe discovery and allocation
+- [ ] TASK-152: Implement `GET /api/debug/probes` endpoint
+- [ ] TASK-153: OpenOCD launch with FTDI interface config
+- [ ] TASK-154: Add `debug_probes()` method to driver
+- [ ] TASK-155: Implement WT-1600–1605 ESP-Prog debug test cases
+
 ### C.2 Deliverables
 
 | Deliverable | Description |
@@ -2100,3 +2774,4 @@ Add this to /etc/rfc2217/slots.json:
 | `conftest.py` | Pytest fixtures (`esp32_workbench`, `wifi_network`, `--wt-url`, `--run-dut`) |
 | `test_instrument.py` | Self-tests (WT-100 through WT-1304) |
 | `cw_beacon.py` | CW beacon engine — GPCLK hardware clock + Morse keying for DF testing |
+| `debug_controller.py` | GDB debug manager — OpenOCD lifecycle, probe allocation, slot state coordination |
