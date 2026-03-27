@@ -1418,8 +1418,10 @@ frequencies in a range.  Defaults to 3.5–4.0 MHz.
 #### 23.6 Implementation
 
 - **`cw_beacon.py`**: Standalone module imported by portal.py
-- **Register access**: `/dev/mem` mmap to BCM2835 GPIO and clock manager
-  registers (requires root — portal runs as root via systemd)
+- **Register access**: `/dev/mem` mmap to GPIO and clock manager registers
+  (requires root — portal runs as root via systemd).  Peripheral base is
+  auto-detected from `/proc/device-tree/soc/ranges` (works on all Pi models:
+  BCM2835 = `0x20000000`, BCM2837/Pi Zero 2 W = `0x3F000000`)
 - **Keying method**: GPIO function select toggle (ALT0 ↔ INPUT) — clock
   generator runs continuously, pin connects/disconnects
 - **Thread model**: Single daemon thread per beacon; starting a new beacon

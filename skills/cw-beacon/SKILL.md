@@ -190,6 +190,7 @@ Attach a short wire (1-2m) to GPIO 5 for a few meters of range. The square wave 
 ## Implementation Notes
 
 - `/dev/mem` access required (root on Pi) — the portal runs as root via systemd
+- Peripheral base auto-detected from `/proc/device-tree/soc/ranges` (works on Pi Zero W, Zero 2 W, Pi 3, Pi 4)
 - Clock generator runs continuously; keying is done by switching GPIO function select (ALT0 vs INPUT) — no phase glitches
 - Only one beacon can be active at a time; starting a new one stops the previous
 - The beacon thread is a daemon thread — it stops automatically on portal shutdown
